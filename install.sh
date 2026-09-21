@@ -3,7 +3,7 @@
 set -euo pipefail
 
 BIN_NAME="webpify"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Colors for terminal output
