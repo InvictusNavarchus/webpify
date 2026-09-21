@@ -5,6 +5,7 @@ import { watch as chokidarWatch } from 'chokidar';
 import { readdir, unlink } from 'node:fs/promises';
 import { Glob } from 'bun';
 import { cac } from 'cac';
+import prettyBytes from 'pretty-bytes';
 
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -96,7 +97,7 @@ async function convert(src: string, opts: Opts): Promise<void> {
     const pct     = Math.round((1 - info.size / srcSize) * 100);
 
     console.log(
-      `  ✓ ${src}  ${fmt(srcSize)} → ${fmt(info.size)}  (${pct}% smaller)`,
+      `  ✓ ${src}  ${prettyBytes(srcSize)} → ${prettyBytes(info.size)}  (${pct}% smaller)`,
     );
 
     if (opts.del) await unlink(src);
@@ -154,23 +155,6 @@ function watchDir(opts: Opts): void {
   })
     .on('add',    (p: string) => { if (imageGlob.match(p)) void convert(p, opts); })
     .on('change', (p: string) => { if (imageGlob.match(p)) void convert(p, opts); });
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function fmt(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-
-  const units = ['KiB', 'MiB', 'GiB'] as const;
-  let val = bytes;
-  let i   = 0;
-
-  while (val >= 1024 && i < units.length - 1) {
-    val /= 1024;
-    i++;
-  }
-
-  return `${val.toFixed(1)} ${units[i] ?? `${val} B`}`;
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
