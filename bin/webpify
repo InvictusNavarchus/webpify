@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# img2webp — Compress PNG/JPG images and convert to WebP using sharp-cli
+# Usage: img2webp [OPTIONS]
+#   -q, --quality NUM    WebP quality 1-100 (default: 80)
+#   -e, --effort NUM     Compression effort 0-9 (default: 6)
+#   -d, --delete         Delete original files after conversion
+#   -r, --recursive      Also process subdirectories
+#   -h, --help           Show help
+
+set -euo pipefail
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+QUALITY=80
+EFFORT=6
+DELETE_ORIGINALS=false
+RECURSIVE=false
+
+# ── Parse arguments ──────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -q|--quality)   QUALITY="$2";          shift 2 ;;
+    -e|--effort)    EFFORT="$2";           shift 2 ;;
+    -d|--delete)    DELETE_ORIGINALS=true; shift   ;;
+    -r|--recursive) RECURSIVE=true;        shift   ;;
+    -h|--help)
+      sed -n '2,8p' "$0" | sed 's/^# \?//'
+      exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+# ── Sanity checks ────────────────────────────────────────────────────────────
+if ! command -v sharp &>/dev/null; then
+  echo "Error: 'sharp' CLI not found. Install with: npm i -g sharp-cli" >&2
+  exit 1
+fi
+
+# ── Collect input files ─────────────────────────────────────────────────────
+shopt -s nullglob nocaseglob
+
+if $RECURSIVE; then
+  files=( ./**/*.png ./**/*.jpg ./**/*.jpeg ./*.png ./*.jpg ./*.jpeg )
+else
+  files=( ./*.png ./*.jpg ./*.jpeg )
+fi
+
+shopt -u nocaseglob
+
+# Deduplicate (in case patterns overlap)
+declare -A seen
+unique_files=()
+for f in "${files[@]}"; do
+  [[ -f "$f" ]] || continue
+  real="$(realpath "$f")"
+  if [[ -z "${seen[$real]+_}" ]]; then
+    seen[$real]=1
+    unique_files+=("$f")
+  fi
+done
+
+if [[ ${#unique_files[@]} -eq 0 ]]; then
+  echo "No PNG/JPG images found in the current directory."
+  exit 0
+fi
+
+echo "Found ${#unique_files[@]} image(s). Converting to WebP (q=$QUALITY, effort=$EFFORT)…"
+echo ""
+
+# ── Process each image ───────────────────────────────────────────────────────
+converted=0
+skipped=0
+failed=0
+
+for src in "${unique_files[@]}"; do
+  name="$(basename "${src%.*}")"
+  dir="$(dirname "$src")"
+  dest="${dir}/${name}.webp"
+
+  # Skip if webp already exists and is newer
+  if [[ -f "$dest" && "$dest" -nt "$src" ]]; then
+    ((skipped++)) || true
+    continue
+  fi
+
+  if sharp \
+    -i "$src" \
+    -o "$dest" \
+    -f webp \
+    -q "$QUALITY" \
+    --effort "$EFFORT" \
+    --smartSubsample \
+    2>/dev/null; then
+
+    src_size=$(stat -c%s "$src" 2>/dev/null || stat -f%z "$src")
+    dst_size=$(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest")
+    ratio=$(awk "BEGIN {printf \"%.0f\", (1 - $dst_size/$src_size) * 100}")
+
+    printf "  ✓ %-40s %6s → %6s  (%s%% smaller)\n" \
+      "$src" \
+      "$(numfmt --to=iec-i --suffix=B "$src_size" 2>/dev/null || echo "${src_size}B")" \
+      "$(numfmt --to=iec-i --suffix=B "$dst_size" 2>/dev/null || echo "${dst_size}B")" \
+      "$ratio"
+
+    if $DELETE_ORIGINALS; then
+      rm -- "$src"
+    fi
+
+    ((converted++)) || true
+  else
+    echo "  ✗ $src (conversion failed)" >&2
+    ((failed++)) || true
+  fi
+done
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+echo ""
+echo "Done: $converted converted, $skipped skipped (up-to-date), $failed failed."
+$DELETE_ORIGINALS && [[ $converted -gt 0 ]] && echo "Original files deleted."
