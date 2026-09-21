@@ -4,6 +4,8 @@ import sharp from 'sharp';
 import { watch as chokidarWatch } from 'chokidar';
 import { parseArgs } from 'node:util';
 import { readdir, stat, unlink } from 'node:fs/promises';
+import { Glob } from 'bun';
+
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -141,7 +143,8 @@ async function convert(src: string, opts: Opts): Promise<void> {
 async function collectFiles(recursive: boolean): Promise<string[]> {
   if (recursive) {
     const files: string[] = [];
-    for await (const entry of Bun.glob('**/*')) {
+    const glob = new Glob('**/*');
+    for await (const entry of glob.scan(".")) {
       if (IMAGE_RE.test(entry)) files.push(entry);
     }
     return files;
