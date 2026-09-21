@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# img2webp — Compress PNG/JPG → WebP using sharp-cli, with optional downscale
-# Usage: img2webp [OPTIONS]
+# webpify — Compress PNG/JPG → WebP using sharp-cli, with optional downscale
+# Usage: webpify [OPTIONS]
 #   -q, --quality NUM      WebP quality 1-100       (default: 80)
 #   -e, --effort NUM       Compression effort 0-9   (default: 6)
 #   -m, --max-res WxH      Max resolution, e.g. 1920x1080  (default: 1920x1080)
