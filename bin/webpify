@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
-# img2webp — Compress PNG/JPG images and convert to WebP using sharp-cli
+# img2webp — Compress PNG/JPG → WebP using sharp-cli, with optional downscale
 # Usage: img2webp [OPTIONS]
-#   -q, --quality NUM    WebP quality 1-100 (default: 80)
-#   -e, --effort NUM     Compression effort 0-9 (default: 6)
-#   -d, --delete         Delete original files after conversion
-#   -r, --recursive      Also process subdirectories
-#   -h, --help           Show help
+#   -q, --quality NUM      WebP quality 1-100       (default: 80)
+#   -e, --effort NUM       Compression effort 0-9   (default: 6)
+#   -m, --max-res WxH      Max resolution, e.g. 1920x1080  (default: 1920x1080)
+#       --no-resize        Disable automatic resizing
+#   -d, --delete           Delete originals after conversion
+#   -r, --recursive        Also process subdirectories
+#   -h, --help             Show this help
 
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 QUALITY=80
 EFFORT=6
+MAX_W=1920
+MAX_H=1080
+RESIZE=true
 DELETE_ORIGINALS=false
 RECURSIVE=false
 
@@ -20,10 +25,17 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -q|--quality)   QUALITY="$2";          shift 2 ;;
     -e|--effort)    EFFORT="$2";           shift 2 ;;
+    -m|--max-res)
+      IFS='xX' read -r MAX_W MAX_H <<< "$2"
+      if [[ -z "$MAX_W" || -z "$MAX_H" ]]; then
+        echo "Error: --max-res expects WxH, e.g. 1920x1080" >&2; exit 1
+      fi
+      shift 2 ;;
+    --no-resize)    RESIZE=false;          shift   ;;
     -d|--delete)    DELETE_ORIGINALS=true; shift   ;;
     -r|--recursive) RECURSIVE=true;        shift   ;;
     -h|--help)
-      sed -n '2,8p' "$0" | sed 's/^# \?//'
+      sed -n '2,10p' "$0" | sed 's/^# \?//'
       exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
@@ -46,7 +58,7 @@ fi
 
 shopt -u nocaseglob
 
-# Deduplicate (in case patterns overlap)
+# Deduplicate
 declare -A seen
 unique_files=()
 for f in "${files[@]}"; do
@@ -63,8 +75,18 @@ if [[ ${#unique_files[@]} -eq 0 ]]; then
   exit 0
 fi
 
-echo "Found ${#unique_files[@]} image(s). Converting to WebP (q=$QUALITY, effort=$EFFORT)…"
+echo "Found ${#unique_files[@]} image(s)."
+echo "  → WebP  q=$QUALITY  effort=$EFFORT"
+$RESIZE && echo "  → Max resolution: ${MAX_W}×${MAX_H} (downscale only)"
 echo ""
+
+# ── Build the resize portion of the sharp command ────────────────────────────
+RESIZE_ARGS=()
+if $RESIZE; then
+  # fit inside  = scale down to fit within WxH, preserve aspect ratio, no crop
+  # withoutEnlargement = never upscale smaller images
+  RESIZE_ARGS=( -- resize "$MAX_W" "$MAX_H" --fit inside --withoutEnlargement )
+fi
 
 # ── Process each image ───────────────────────────────────────────────────────
 converted=0
@@ -76,7 +98,7 @@ for src in "${unique_files[@]}"; do
   dir="$(dirname "$src")"
   dest="${dir}/${name}.webp"
 
-  # Skip if webp already exists and is newer
+  # Skip if webp already exists and is newer than source
   if [[ -f "$dest" && "$dest" -nt "$src" ]]; then
     ((skipped++)) || true
     continue
@@ -89,6 +111,7 @@ for src in "${unique_files[@]}"; do
     -q "$QUALITY" \
     --effort "$EFFORT" \
     --smartSubsample \
+    "${RESIZE_ARGS[@]+"${RESIZE_ARGS[@]}"}" \
     2>/dev/null; then
 
     src_size=$(stat -c%s "$src" 2>/dev/null || stat -f%z "$src")
