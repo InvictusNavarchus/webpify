@@ -20,10 +20,6 @@ interface Opts {
   watch: boolean;
 }
 
-// ── Constants ────────────────────────────────────────────────────────────────
-
-const IMAGE_RE = /\.(png|jpe?g)$/i;
-
 // ── CLI parsing ──────────────────────────────────────────────────────────────
 
 function parseOpts(): Opts {
@@ -110,21 +106,24 @@ async function convert(src: string, opts: Opts): Promise<void> {
   }
 }
 
+// ── Utils ─────────────────────────────────────────────────────────────────────
+
+const imageGlob = new Glob('**/*.{png,jpg,jpeg,PNG,JPG,JPEG}');
+
 // ── Batch: process existing files ────────────────────────────────────────────
 
 async function collectFiles(recursive: boolean): Promise<string[]> {
   if (recursive) {
     const files: string[] = [];
-    const glob = new Glob('**/*');
-    for await (const entry of glob.scan(".")) {
-      if (IMAGE_RE.test(entry)) files.push(entry);
+    for await (const entry of imageGlob.scan(".")) {
+      files.push(entry);
     }
     return files;
   }
 
   const entries = await readdir('.', { withFileTypes: true });
   return entries
-    .filter((e) => e.isFile() && IMAGE_RE.test(e.name))
+    .filter((e) => e.isFile() && imageGlob.match(e.name))
     .map((e) => e.name);
 }
 
@@ -153,8 +152,8 @@ function watchDir(opts: Opts): void {
       pollInterval: 100,
     },
   })
-    .on('add',    (p: string) => { if (IMAGE_RE.test(p)) void convert(p, opts); })
-    .on('change', (p: string) => { if (IMAGE_RE.test(p)) void convert(p, opts); });
+    .on('add',    (p: string) => { if (imageGlob.match(p)) void convert(p, opts); })
+    .on('change', (p: string) => { if (imageGlob.match(p)) void convert(p, opts); });
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
