@@ -1,101 +1,206 @@
-#!/usr/bin/env node
-// webpify — Compress PNG/JPG → WebP
+#!/usr/bin/env bun
 
 import sharp from 'sharp';
-import chokidar from 'chokidar';
+import { watch as chokidarWatch } from 'chokidar';
 import { parseArgs } from 'node:util';
-import fs from 'node:fs/promises';
-import path from 'node:path';
+import { readdir, stat, unlink } from 'node:fs/promises';
 
-// ── CLI args ────────────────────────────────────────────────────────────────
-const { values: args } = parseArgs({
-  options: {
-    quality:    { short: 'q', type: 'string',  default: '80' },
-    effort:     { short: 'e', type: 'string',  default: '6' },
-    'max-res':  { short: 'm', type: 'string',  default: '1920x1080' },
-    'no-resize':{ type: 'boolean', default: false },
-    delete:     { short: 'd', type: 'boolean', default: false },
-    recursive:  { short: 'r', type: 'boolean', default: false },
-    watch:      { short: 'w', type: 'boolean', default: false },
-    help:       { short: 'h', type: 'boolean', default: false },
-  },
-});
+// ── Types ────────────────────────────────────────────────────────────────────
 
-const QUALITY = Number(args.quality);
-const EFFORT  = Number(args.effort);
-const [MAX_W, MAX_H] = args['max-res'].split(/x/i).map(Number);
-const RESIZE  = !args['no-resize'];
-const DEL     = args.delete;
+interface Opts {
+  quality: number;
+  effort: number;
+  maxW: number;
+  maxH: number;
+  resize: boolean;
+  del: boolean;
+  recursive: boolean;
+  watch: boolean;
+}
 
-// ── Convert one file ────────────────────────────────────────────────────────
-async function convert(src) {
+// ── Constants ────────────────────────────────────────────────────────────────
+
+const IMAGE_RE = /\.(png|jpe?g)$/i;
+
+const HELP = `
+webpify — Compress PNG/JPG → WebP
+
+Usage: webpify [OPTIONS]
+
+  -q, --quality NUM    WebP quality 1–100        (default: 80)
+  -e, --effort NUM     Compression effort 0–9     (default: 6)
+  -m, --max-res WxH    Max resolution             (default: 1920x1080)
+      --no-resize      Disable automatic resizing
+  -d, --delete         Delete originals after conversion
+  -r, --recursive      Also process subdirectories
+  -w, --watch          Watch for new/changed files
+  -h, --help           Show this help
+`.trim();
+
+// ── CLI parsing ──────────────────────────────────────────────────────────────
+
+function parseOpts(): Opts {
+  const { values } = parseArgs({
+    options: {
+      quality:     { short: 'q', type: 'string'  },
+      effort:      { short: 'e', type: 'string'  },
+      'max-res':   { short: 'm', type: 'string'  },
+      'no-resize': {               type: 'boolean' },
+      delete:      { short: 'd', type: 'boolean' },
+      recursive:   { short: 'r', type: 'boolean' },
+      watch:       { short: 'w', type: 'boolean' },
+      help:        { short: 'h', type: 'boolean' },
+    },
+  });
+
+  if (values.help) {
+    console.log(HELP);
+    process.exit(0);
+  }
+
+  // quality / effort — parseArgs types these as string | boolean | undefined,
+  // but we declared type:'string', so boolean can't actually occur at runtime.
+  // Narrow for the compiler regardless.
+  const quality = Number(typeof values.quality === 'string' ? values.quality : '80');
+  const effort  = Number(typeof values.effort  === 'string' ? values.effort  : '6');
+
+  if (!Number.isFinite(quality) || quality < 1 || quality > 100) {
+    console.error('Error: --quality must be 1–100');
+    process.exit(1);
+  }
+  if (!Number.isFinite(effort) || effort < 0 || effort > 9) {
+    console.error('Error: --effort must be 0–9');
+    process.exit(1);
+  }
+
+  // max-res
+  const rawRes  = values['max-res'];
+  const resStr  = typeof rawRes === 'string' ? rawRes : '1920x1080';
+  const parts   = resStr.split(/x/i).map(Number);
+  const [w, h]  = parts;
+
+  if (
+    parts.length !== 2 ||
+    w === undefined || h === undefined ||
+    !Number.isFinite(w) || !Number.isFinite(h) ||
+    w <= 0 || h <= 0
+  ) {
+    console.error('Error: --max-res expects WxH, e.g. 1920x1080');
+    process.exit(1);
+  }
+
+  return {
+    quality,
+    effort,
+    maxW: w,
+    maxH: h,
+    resize:    !values['no-resize'],
+    del:        values.delete    ?? false,
+    recursive:  values.recursive ?? false,
+    watch:      values.watch     ?? false,
+  };
+}
+
+// ── Convert a single file ────────────────────────────────────────────────────
+
+async function convert(src: string, opts: Opts): Promise<void> {
   const dest = src.replace(/\.(png|jpe?g)$/i, '.webp');
 
   try {
     let pipeline = sharp(src);
 
-    if (RESIZE) {
+    if (opts.resize) {
       pipeline = pipeline.resize({
-        width: MAX_W,
-        height: MAX_H,
+        width: opts.maxW,
+        height: opts.maxH,
         fit: 'inside',
         withoutEnlargement: true,
       });
     }
 
     const info = await pipeline
-      .webp({ quality: QUALITY, effort: EFFORT, smartSubsample: true })
+      .webp({ quality: opts.quality, effort: opts.effort, smartSubsample: true })
       .toFile(dest);
 
-    const srcSize = (await fs.stat(src)).size;
-    const pct = Math.round((1 - info.size / srcSize) * 100);
-    console.log(`  ✓ ${src}  ${fmt(srcSize)} → ${fmt(info.size)}  (${pct}% smaller)`);
+    const srcSize = (await stat(src)).size;
+    const pct     = Math.round((1 - info.size / srcSize) * 100);
 
-    if (DEL) await fs.unlink(src);
-  } catch (err) {
-    console.error(`  ✗ ${src}  ${err.message}`);
+    console.log(
+      `  ✓ ${src}  ${fmt(srcSize)} → ${fmt(info.size)}  (${pct}% smaller)`,
+    );
+
+    if (opts.del) await unlink(src);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`  ✗ ${src}  ${msg}`);
   }
 }
 
-// ── Batch: glob existing files ──────────────────────────────────────────────
-async function batch() {
-  const exts = /\.(png|jpe?g)$/i;
-  const walk = args.recursive
-    ? await glob('./**/*', { nodir: true })   // e.g. tiny-glob, or fs.glob in Node 22
-    : await fs.readdir('.');
+// ── Batch: process existing files ────────────────────────────────────────────
 
-  const files = walk.filter(f => exts.test(f));
-  if (!files.length) return console.log('No PNG/JPG images found.');
+async function collectFiles(recursive: boolean): Promise<string[]> {
+  if (recursive) {
+    const files: string[] = [];
+    for await (const entry of Bun.glob('**/*')) {
+      if (IMAGE_RE.test(entry)) files.push(entry);
+    }
+    return files;
+  }
 
-  console.log(`Found ${files.length} image(s).\n`);
-  await Promise.all(files.map(convert));
+  const entries = await readdir('.', { withFileTypes: true });
+  return entries
+    .filter((e) => e.isFile() && IMAGE_RE.test(e.name))
+    .map((e) => e.name);
 }
 
-// ── Watch mode ──────────────────────────────────────────────────────────────
-function watch() {
+async function batch(opts: Opts): Promise<void> {
+  const files = await collectFiles(opts.recursive);
+
+  if (files.length === 0) {
+    console.log('No PNG/JPG images found.');
+    return;
+  }
+
+  console.log(`Found ${files.length} image(s).\n`);
+  await Promise.all(files.map((f) => convert(f, opts)));
+}
+
+// ── Watch mode ───────────────────────────────────────────────────────────────
+
+function watchDir(opts: Opts): void {
   console.log('Watching… (Ctrl-C to stop)\n');
 
-  chokidar.watch('.', {
-    ignored: /\.webp$/,          // don't react to our own output
-    depth: args.recursive ? undefined : 0,
-    awaitWriteFinish: {          // wait for the file to actually be done
+  chokidarWatch('.', {
+    ignored: /\.webp$/,
+    depth: opts.recursive ? undefined : 0,
+    awaitWriteFinish: {
       stabilityThreshold: 300,
       pollInterval: 100,
     },
   })
-  .on('add',       p => /\.(png|jpe?g)$/i.test(p) && convert(p))
-  .on('change',    p => /\.(png|jpe?g)$/i.test(p) && convert(p));
+    .on('add',    (p: string) => { if (IMAGE_RE.test(p)) void convert(p, opts); })
+    .on('change', (p: string) => { if (IMAGE_RE.test(p)) void convert(p, opts); });
 }
 
-// ── Main ────────────────────────────────────────────────────────────────────
-await batch();
-if (args.watch) watch();
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
-// ── Tiny helper ─────────────────────────────────────────────────────────────
-function fmt(bytes) {
+function fmt(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  const units = ['KiB', 'MiB', 'GiB'];
-  let i = -1;
-  do { bytes /= 1024; i++; } while (bytes >= 1024 && i < units.length - 1);
-  return `${bytes.toFixed(1)} ${units[i]}`;
+
+  const units = ['KiB', 'MiB', 'GiB'] as const;
+  let val = bytes;
+  let i   = 0;
+
+  while (val >= 1024 && i < units.length - 1) {
+    val /= 1024;
+    i++;
+  }
+
+  return `${val.toFixed(1)} ${units[i] ?? `${val} B`}`;
 }
+
+// ── Main ─────────────────────────────────────────────────────────────────────
+
+const opts = parseOpts();
+await batch(opts);
+if (opts.watch) watchDir(opts);
