@@ -2,9 +2,9 @@
 
 import sharp from 'sharp';
 import { watch as chokidarWatch } from 'chokidar';
-import { parseArgs } from 'node:util';
 import { readdir, stat, unlink } from 'node:fs/promises';
 import { Glob } from 'bun';
+import { cac } from 'cac';
 
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -24,82 +24,54 @@ interface Opts {
 
 const IMAGE_RE = /\.(png|jpe?g)$/i;
 
-const HELP = `
-webpify — Compress PNG/JPG → WebP
-
-Usage: webpify [OPTIONS]
-
-  -q, --quality NUM    WebP quality 1–100        (default: 80)
-  -e, --effort NUM     Compression effort 0–9     (default: 6)
-  -m, --max-res WxH    Max resolution             (default: 1920x1080)
-      --no-resize      Disable automatic resizing
-  -d, --delete         Delete originals after conversion
-  -r, --recursive      Also process subdirectories
-  -w, --watch          Watch for new/changed files
-  -h, --help           Show this help
-`.trim();
-
 // ── CLI parsing ──────────────────────────────────────────────────────────────
 
 function parseOpts(): Opts {
-  const { values } = parseArgs({
-    options: {
-      quality:     { short: 'q', type: 'string'  },
-      effort:      { short: 'e', type: 'string'  },
-      'max-res':   { short: 'm', type: 'string'  },
-      'no-resize': {               type: 'boolean' },
-      delete:      { short: 'd', type: 'boolean' },
-      recursive:   { short: 'r', type: 'boolean' },
-      watch:       { short: 'w', type: 'boolean' },
-      help:        { short: 'h', type: 'boolean' },
-    },
-  });
+  const cli = cac('webpify');
 
-  if (values.help) {
-    console.log(HELP);
-    process.exit(0);
-  }
+  cli
+    .option('-q, --quality <num>', 'WebP quality 1–100', { default: 80 })
+    .option('-e, --effort <num>', 'Compression effort 0–9', { default: 6 })
+    .option('-m, --max-res <WxH>', 'Max resolution', { default: '1920x1080' })
+    .option('--no-resize', 'Disable automatic resizing')
+    .option('-d, --delete', 'Delete originals after conversion')
+    .option('-r, --recursive', 'Also process subdirectories')
+    .option('-w, --watch', 'Watch for new/changed files');
 
-  // quality / effort — parseArgs types these as string | boolean | undefined,
-  // but we declared type:'string', so boolean can't actually occur at runtime.
-  // Narrow for the compiler regardless.
-  const quality = Number(typeof values.quality === 'string' ? values.quality : '80');
-  const effort  = Number(typeof values.effort  === 'string' ? values.effort  : '6');
+  cli.help();
 
-  if (!Number.isFinite(quality) || quality < 1 || quality > 100) {
+  // Parses process.argv; handles -h/--help automatically
+  const parsed = cli.parse();
+
+  // If user passed -h or --help, cac exits cleanly before reaching here.
+  const options = parsed.options;
+
+  // Validation: Quality & Effort
+  if (options.quality < 1 || options.quality > 100) {
     console.error('Error: --quality must be 1–100');
     process.exit(1);
   }
-  if (!Number.isFinite(effort) || effort < 0 || effort > 9) {
+  if (options.effort < 0 || options.effort > 9) {
     console.error('Error: --effort must be 0–9');
     process.exit(1);
   }
 
-  // max-res
-  const rawRes  = values['max-res'];
-  const resStr  = typeof rawRes === 'string' ? rawRes : '1920x1080';
-  const parts   = resStr.split(/x/i).map(Number);
-  const [w, h]  = parts;
-
-  if (
-    parts.length !== 2 ||
-    w === undefined || h === undefined ||
-    !Number.isFinite(w) || !Number.isFinite(h) ||
-    w <= 0 || h <= 0
-  ) {
+  // Validation: Max Resolution (WxH)
+  const [w, h] = String(options.maxRes).split(/x/i).map(Number);
+  if (!w || !h || w <= 0 || h <= 0) {
     console.error('Error: --max-res expects WxH, e.g. 1920x1080');
     process.exit(1);
   }
 
   return {
-    quality,
-    effort,
+    quality: options.quality,
+    effort: options.effort,
     maxW: w,
     maxH: h,
-    resize:    !values['no-resize'],
-    del:        values.delete    ?? false,
-    recursive:  values.recursive ?? false,
-    watch:      values.watch     ?? false,
+    resize: options.resize, // cac sets this to false if --no-resize is passed
+    del: Boolean(options.delete),
+    recursive: Boolean(options.recursive),
+    watch: Boolean(options.watch),
   };
 }
 
