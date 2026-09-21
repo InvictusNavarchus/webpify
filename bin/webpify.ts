@@ -2,7 +2,7 @@
 
 import sharp from 'sharp';
 import { watch as chokidarWatch } from 'chokidar';
-import { readdir, stat, unlink } from 'node:fs/promises';
+import { readdir, unlink } from 'node:fs/promises';
 import { Glob } from 'bun';
 import { cac } from 'cac';
 
@@ -92,7 +92,7 @@ async function convert(src: string, opts: Opts): Promise<void> {
       .webp({ quality: opts.quality, effort: opts.effort, smartSubsample: true })
       .toFile(dest);
 
-    const srcSize = (await stat(src)).size;
+    const srcSize = Bun.file(src).size;
     const pct     = Math.round((1 - info.size / srcSize) * 100);
 
     console.log(
