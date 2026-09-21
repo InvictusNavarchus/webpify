@@ -137,5 +137,5 @@ done
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
-echo "Done: $converted converted, $skipped skipped (up-to-date), $failed failed."
+echo "Done: $converted converted, $skipped skipped, $failed failed."
 $DELETE_ORIGINALS && [[ $converted -gt 0 ]] && echo "Original files deleted."
