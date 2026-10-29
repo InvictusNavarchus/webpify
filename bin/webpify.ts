@@ -19,6 +19,7 @@ interface Opts {
   del: boolean;
   recursive: boolean;
   watch: boolean;
+  force: boolean;
 }
 
 // ── CLI parsing ──────────────────────────────────────────────────────────────
@@ -33,7 +34,8 @@ function parseOpts(): Opts {
     .option('--no-resize', 'Disable automatic resizing')
     .option('-d, --delete', 'Delete originals after conversion')
     .option('-r, --recursive', 'Also process subdirectories')
-    .option('-w, --watch', 'Watch for new/changed files');
+    .option('-w, --watch', 'Watch for new/changed files')
+    .option('-f, --force', 'Force re-conversion even if up-to-date');
 
   cli.help();
 
@@ -69,13 +71,30 @@ function parseOpts(): Opts {
     del: Boolean(options.delete),
     recursive: Boolean(options.recursive),
     watch: Boolean(options.watch),
+    force: Boolean(options.force),
   };
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function getDestPath(src: string): string {
+  return src.replace(/\.(png|jpe?g)$/i, '.webp');
+}
+
+async function isUpToDate(src: string, dest: string): Promise<boolean> {
+  const destFile = Bun.file(dest);
+  if (!(await destFile.exists())) return false;
+  return destFile.lastModified >= Bun.file(src).lastModified;
 }
 
 // ── Convert a single file ────────────────────────────────────────────────────
 
 async function convert(src: string, opts: Opts): Promise<void> {
-  const dest = src.replace(/\.(png|jpe?g)$/i, '.webp');
+  const dest = getDestPath(src);
+
+  if (!opts.force && (await isUpToDate(src, dest))) {
+    return;
+  }
 
   try {
     let pipeline = sharp(src);
@@ -129,14 +148,36 @@ async function collectFiles(recursive: boolean): Promise<string[]> {
 }
 
 async function batch(opts: Opts): Promise<void> {
-  const files = await collectFiles(opts.recursive);
+  const allFiles = await collectFiles(opts.recursive);
 
-  if (files.length === 0) {
+  if (allFiles.length === 0) {
     console.log('No PNG/JPG images found.');
     return;
   }
 
-  console.log(`Found ${files.length} image(s).\n`);
+  const files = opts.force
+    ? allFiles
+    : (
+        await Promise.all(
+          allFiles.map(async (f) => ({
+            file: f,
+            needed: !(await isUpToDate(f, getDestPath(f))),
+          })),
+        )
+      )
+        .filter((item) => item.needed)
+        .map((item) => item.file);
+
+  if (files.length === 0) {
+    console.log(`Found ${allFiles.length} image(s) (all up-to-date).`);
+    return;
+  }
+
+  console.log(
+    `Found ${files.length} image(s) to convert${
+      files.length < allFiles.length ? ` (${allFiles.length - files.length} already up-to-date)` : ''
+    }.\n`,
+  );
   await Promise.all(files.map((f) => convert(f, opts)));
 }
 
@@ -148,6 +189,7 @@ function watchDir(opts: Opts): void {
   chokidarWatch('.', {
     ignored: /\.webp$/,
     depth: opts.recursive ? undefined : 0,
+    ignoreInitial: true,
     awaitWriteFinish: {
       stabilityThreshold: 300,
       pollInterval: 100,
