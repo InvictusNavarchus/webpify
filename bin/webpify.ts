@@ -2,9 +2,9 @@
 
 import sharp from 'sharp';
 import { watch as chokidarWatch } from 'chokidar';
-import { readdir, unlink } from 'node:fs/promises';
+import { mkdtemp, readdir, realpath, rename, rm, stat, unlink } from 'node:fs/promises';
 import { Glob } from 'bun';
-import { basename, dirname } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { cac } from 'cac';
 import prettyBytes from 'pretty-bytes';
 
@@ -106,19 +106,53 @@ async function isUpToDate(src: string, dest: string): Promise<boolean> {
   return destFile.lastModified >= Bun.file(src).lastModified;
 }
 
+// Probe supported extension spellings through the filesystem itself. This respects
+// case-insensitive volumes without rejecting distinct names on case-sensitive ones.
+const extensions = ['png', 'jpg', 'jpeg'].flatMap((extension) =>
+  [...extension].reduce<string[]>((variants, letter) =>
+    variants.flatMap((prefix) => [prefix + letter, prefix + letter.toUpperCase()]), ['']));
+
+async function assertUnambiguous(src: string): Promise<void> {
+  const stem = src.replace(/\.(png|jpe?g)$/i, '');
+  const matches = await Promise.all(extensions.map(async (extension) => {
+    const candidate = `${stem}.${extension}`;
+    try {
+      if (!(await stat(candidate)).isFile()) return undefined;
+      return await realpath(candidate);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw err;
+    }
+  }));
+  if (new Set(matches.filter((path) => path !== undefined)).size > 1) {
+    throw new Error(`Output collision for ${getDestPath(src)}. Rename the sources first.`);
+  }
+}
+
+// Lowercasing here only serializes work; collision decisions still use the
+// filesystem. Distinct case-sensitive destinations remain supported.
+const pending = new Map<string, Promise<void>>();
+
+async function convert(src: string, opts: Opts, preflightChecked = false): Promise<void> {
+  const key = resolve(getDestPath(src)).toLowerCase();
+  const previous = pending.get(key) ?? Promise.resolve();
+  const current = previous.then(() => convertOne(src, opts, preflightChecked));
+  pending.set(key, current);
+  try {
+    await current;
+  } finally {
+    if (pending.get(key) === current) pending.delete(key);
+  }
+}
+
 // ── Convert a single file ────────────────────────────────────────────────────
 
-async function convert(src: string, opts: Opts): Promise<void> {
+async function convertOne(src: string, opts: Opts, preflightChecked: boolean): Promise<void> {
   const dest = getDestPath(src);
 
+  let temporary: string | undefined;
   try {
-    // Recheck siblings for watch events as well as the initial batch.
-    const siblings = await readdir(dirname(src));
-    const conflicts = siblings.filter((name) =>
-      /\.(png|jpe?g)$/i.test(name) && getDestPath(name) === basename(dest));
-    if (conflicts.length > 1) {
-      throw new Error(`Output collision for ${dest}: ${conflicts.join(', ')}. Rename the sources first.`);
-    }
+    if (!preflightChecked) await assertUnambiguous(src);
     if (!opts.force && (await isUpToDate(src, dest))) return;
 
     let pipeline = sharp(src).autoOrient();
@@ -132,9 +166,14 @@ async function convert(src: string, opts: Opts): Promise<void> {
       });
     }
 
+    temporary = await mkdtemp(join(dirname(src), '.webpify-'));
+    const output = join(temporary, 'output.webp');
     const info = await pipeline
       .webp({ quality: opts.quality, effort: opts.effort, smartSubsample: true })
-      .toFile(dest);
+      .toFile(output);
+
+    await assertUnambiguous(src);
+    await rename(output, dest);
 
     const srcSize = Bun.file(src).size;
     const pct     = Math.round((1 - info.size / srcSize) * 100);
@@ -148,6 +187,8 @@ async function convert(src: string, opts: Opts): Promise<void> {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`  ✗ ${src}  ${msg}`);
     process.exitCode = 1;
+  } finally {
+    if (temporary) await rm(temporary, { recursive: true, force: true });
   }
 }
 
@@ -175,15 +216,12 @@ async function collectFiles(recursive: boolean): Promise<string[]> {
 async function batch(opts: Opts): Promise<void> {
   const allFiles = await collectFiles(opts.recursive);
 
-  const destinations = new Set<string>();
-  for (const src of allFiles) {
-    const dest = getDestPath(src);
-    if (destinations.has(dest)) {
-      console.error(`Error: Output collision for ${dest}. Rename the sources first.`);
-      process.exitCode = 1;
-      return;
-    }
-    destinations.add(dest);
+  try {
+    await Promise.all(allFiles.map(assertUnambiguous));
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+    return;
   }
 
   if (allFiles.length === 0) {
@@ -214,7 +252,7 @@ async function batch(opts: Opts): Promise<void> {
       files.length < allFiles.length ? ` (${allFiles.length - files.length} already up-to-date)` : ''
     }.\n`,
   );
-  await Promise.all(files.map((f) => convert(f, opts)));
+  await Promise.all(files.map((f) => convert(f, opts, true)));
 }
 
 // ── Watch mode ───────────────────────────────────────────────────────────────
