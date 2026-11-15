@@ -4,6 +4,7 @@ import sharp from 'sharp';
 import { watch as chokidarWatch } from 'chokidar';
 import { readdir, unlink } from 'node:fs/promises';
 import { Glob } from 'bun';
+import { basename, dirname } from 'node:path';
 import { cac } from 'cac';
 import prettyBytes from 'pretty-bytes';
 
@@ -106,11 +107,16 @@ async function isUpToDate(src: string, dest: string): Promise<boolean> {
 async function convert(src: string, opts: Opts): Promise<void> {
   const dest = getDestPath(src);
 
-  if (!opts.force && (await isUpToDate(src, dest))) {
-    return;
-  }
-
   try {
+    // Recheck siblings for watch events as well as the initial batch.
+    const siblings = await readdir(dirname(src));
+    const conflicts = siblings.filter((name) =>
+      /\.(png|jpe?g)$/i.test(name) && getDestPath(name) === basename(dest));
+    if (conflicts.length > 1) {
+      throw new Error(`Output collision for ${dest}: ${conflicts.join(', ')}. Rename the sources first.`);
+    }
+    if (!opts.force && (await isUpToDate(src, dest))) return;
+
     let pipeline = sharp(src);
 
     if (opts.resize) {
@@ -163,6 +169,17 @@ async function collectFiles(recursive: boolean): Promise<string[]> {
 
 async function batch(opts: Opts): Promise<void> {
   const allFiles = await collectFiles(opts.recursive);
+
+  const destinations = new Set<string>();
+  for (const src of allFiles) {
+    const dest = getDestPath(src);
+    if (destinations.has(dest)) {
+      console.error(`Error: Output collision for ${dest}. Rename the sources first.`);
+      process.exitCode = 1;
+      return;
+    }
+    destinations.add(dest);
+  }
 
   if (allFiles.length === 0) {
     console.log('No PNG/JPG images found.');

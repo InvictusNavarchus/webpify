@@ -287,3 +287,15 @@ test.each([{ args: ['image.png'] }, { args: ['--qualty', '90'] }, { args: ['--qu
     expect(await readdir(directory)).toEqual(['image.png']);
   },
 );
+
+test('rejects colliding destinations without overwriting output or deleting sources', async () => {
+  await createImage('photo.png');
+  await createImage('photo.jpg');
+  await Bun.write(join(directory, 'photo.webp'), 'existing output');
+  const result = await runCli('--delete', '--force');
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain('collision');
+  expect(await Bun.file(join(directory, 'photo.webp')).text()).toBe('existing output');
+  expect(await Bun.file(join(directory, 'photo.png')).exists()).toBe(true);
+  expect(await Bun.file(join(directory, 'photo.jpg')).exists()).toBe(true);
+});
