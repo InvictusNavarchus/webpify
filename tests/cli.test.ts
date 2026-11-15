@@ -268,3 +268,22 @@ test.each([
   expect(await readdir(directory)).toEqual(['image.png']);
   expect(await Bun.file(join(directory, 'image.png')).bytes()).toEqual(original);
 });
+
+test('--help never converts or deletes images, even with processing flags', async () => {
+  await createImage();
+  const result = await runCli('--help', '--delete', '--force');
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain('Usage:');
+  expect(await readdir(directory)).toEqual(['image.png']);
+});
+
+test.each([{ args: ['image.png'] }, { args: ['--qualty', '90'] }, { args: ['--quality'] }])(
+  'rejects unsupported arguments before touching files: %j',
+  async ({ args }) => {
+    await createImage();
+    const result = await runCli(...args, '--delete');
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('Error:');
+    expect(await readdir(directory)).toEqual(['image.png']);
+  },
+);

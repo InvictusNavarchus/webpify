@@ -37,14 +37,13 @@ function parseOpts(): Opts {
     .option('-w, --watch', 'Watch for new/changed files')
     .option('-f, --force', 'Force re-conversion even if up-to-date');
 
+  cli.usage('[options]');
   cli.help();
 
-  // Parses process.argv; handles -h/--help automatically
   const parsed = cli.parse();
-
-  // If user passed -h or --help, cac exits cleanly before reaching here.
   const options = parsed.options;
-
+  // CAC prints help but does not terminate execution.
+  if (options.help) process.exit(0);
   // Validation: Quality & Effort
   if (!Number.isInteger(options.quality) || options.quality < 1 || options.quality > 100) {
     console.error('Error: --quality must be an integer from 1–100');
@@ -63,6 +62,17 @@ function parseOpts(): Opts {
     !Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w <= 0 || h <= 0
   ) {
     console.error('Error: --max-res expects WxH, e.g. 1920x1080');
+    process.exit(1);
+  }
+
+  try {
+    cli.globalCommand.checkUnknownOptions();
+    cli.globalCommand.checkOptionValue();
+    if (parsed.args.length > 0) {
+      throw new Error('File and directory arguments are not supported. Run webpify inside the target directory.');
+    }
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
 
