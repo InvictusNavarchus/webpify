@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, readdir, rm, stat, utimes } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readdir, rm, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,14 +7,64 @@ import sharp from 'sharp';
 
 const cli = fileURLToPath(new URL('../bin/webpify.ts', import.meta.url));
 let directory: string;
+let watcher: ReturnType<typeof Bun.spawn> | undefined;
 
 beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), 'webpify-test-'));
 });
 
 afterEach(async () => {
+  if (watcher) {
+    watcher.kill();
+    await watcher.exited;
+    watcher = undefined;
+  }
   await rm(directory, { recursive: true, force: true });
 });
+
+async function waitFor(check: () => Promise<boolean>) {
+  const deadline = Date.now() + 5000;
+  while (!(await check())) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for watch-mode output');
+    await Bun.sleep(50);
+  }
+}
+
+async function startWatcher(...args: string[]) {
+  const child = Bun.spawn([process.execPath, cli, '--watch', '--force', ...args], {
+    cwd: directory,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  watcher = child;
+  let stdout = '';
+  let stderr = '';
+  const readStdout = (async () => {
+    for await (const chunk of child.stdout) stdout += new TextDecoder().decode(chunk);
+  })();
+  const readStderr = (async () => {
+    for await (const chunk of child.stderr) stderr += new TextDecoder().decode(chunk);
+  })();
+  await waitFor(async () => stdout.includes('Watching'));
+  // The CLI logs before Chokidar is ready. Observe a real conversion instead of
+  // assuming the initial scan completes within a fixed startup delay.
+  const deadline = Date.now() + 5000;
+  while (!(await Bun.file(join(directory, 'probe.webp')).exists())) {
+    if (Date.now() >= deadline) throw new Error('Watcher did not become ready');
+    await createImage('probe.png');
+    await Bun.sleep(500);
+  }
+  return {
+    output: () => stdout,
+    async stop() {
+      child.kill();
+      await child.exited;
+      await Promise.all([readStdout, readStderr]);
+      watcher = undefined;
+      expect(stderr).toBe('');
+    },
+  };
+}
 
 async function createImage(name = 'image.png', width = 40, height = 20) {
   await sharp({
@@ -37,7 +87,8 @@ async function runCli(...args: string[]) {
 }
 
 async function expectWebp(name: string, width: number, height: number) {
-  const output = sharp(join(directory, name));
+  // Read fresh bytes so libvips cannot reuse cached data after a watched rewrite.
+  const output = sharp(await Bun.file(join(directory, name)).bytes());
   expect(await output.metadata()).toMatchObject({ format: 'webp', width, height });
   // Decode the pixels too: a readable header alone does not prove valid output.
   await output.raw().toBuffer();
@@ -127,6 +178,57 @@ test('only processes nested images with --recursive', async () => {
   expect(await Bun.file(join(directory, 'notes.txt')).text()).toBe('Keep me');
   expect(await Bun.file(join(directory, 'notes.webp')).exists()).toBe(false);
 });
+
+test.each([false, true])('watch mode respects recursive=%s for newly created directories', async (recursive) => {
+  const running = await startWatcher(...(recursive ? ['--recursive'] : []));
+  await mkdir(join(directory, 'nested'));
+  await createImage('nested/photo.jpeg');
+  await createImage('top.png');
+  await waitFor(async () => running.output().includes('✓ top.png'));
+  await expectWebp('top.webp', 40, 20);
+  if (recursive) {
+    await waitFor(async () => running.output().includes('✓ nested/photo.jpeg'));
+    await expectWebp('nested/photo.webp', 40, 20);
+  } else {
+    await Bun.sleep(700);
+    expect(await Bun.file(join(directory, 'nested/photo.webp')).exists()).toBe(false);
+  }
+  await running.stop();
+}, 15000);
+
+test('watch mode handles additions, changes, recreation and chunked writes without output loops', async () => {
+  const running = await startWatcher();
+  await createImage();
+  await waitFor(async () => running.output().includes('✓ image.png'));
+  await expectWebp('image.webp', 40, 20);
+
+  await createImage('image.png', 60, 30);
+  await waitFor(async () => running.output().split('✓ image.png').length - 1 >= 2);
+  await expectWebp('image.webp', 60, 30);
+
+  await rm(join(directory, 'image.png'));
+  await Bun.sleep(400);
+  await createImage('image.png', 80, 40);
+  await waitFor(async () => running.output().split('✓ image.png').length - 1 >= 3);
+  await expectWebp('image.webp', 80, 40);
+
+  const image = await sharp({
+    create: { width: 40, height: 20, channels: 3, background: '#4267ac' },
+  }).png().toBuffer();
+  const path = join(directory, 'chunked.png');
+  const partSize = Math.ceil(image.length / 8);
+  for (let offset = 0; offset < image.length; offset += partSize) {
+    await appendFile(path, image.subarray(offset, offset + partSize));
+    expect(await Bun.file(join(directory, 'chunked.webp')).exists()).toBe(false);
+    await Bun.sleep(100);
+  }
+  await waitFor(async () => running.output().includes('✓ chunked.png'));
+  await expectWebp('chunked.webp', 40, 20);
+  const output = running.output();
+  await Bun.sleep(700);
+  expect(running.output()).toBe(output);
+  await running.stop();
+}, 15000);
 
 test.each([
   [1, 0],
