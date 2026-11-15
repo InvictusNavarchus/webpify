@@ -117,7 +117,7 @@ async function convert(src: string, opts: Opts): Promise<void> {
     }
     if (!opts.force && (await isUpToDate(src, dest))) return;
 
-    let pipeline = sharp(src);
+    let pipeline = sharp(src).autoOrient();
 
     if (opts.resize) {
       pipeline = pipeline.resize({

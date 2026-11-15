@@ -299,3 +299,12 @@ test('rejects colliding destinations without overwriting output or deleting sour
   expect(await Bun.file(join(directory, 'photo.png')).exists()).toBe(true);
   expect(await Bun.file(join(directory, 'photo.jpg')).exists()).toBe(true);
 });
+
+test('applies EXIF orientation before resizing and stripping metadata', async () => {
+  await sharp({
+    create: { width: 40, height: 20, channels: 3, background: '#4267ac' },
+  }).withMetadata({ orientation: 6 }).jpeg().toFile(join(directory, 'portrait.jpg'));
+  expect((await runCli('--max-res', '10x30')).exitCode).toBe(0);
+  await expectWebp('portrait.webp', 10, 20);
+  expect((await sharp(join(directory, 'portrait.webp')).metadata()).orientation).toBeUndefined();
+});
