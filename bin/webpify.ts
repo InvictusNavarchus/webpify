@@ -32,14 +32,18 @@ function parseOpts(): Opts {
     .option('-q, --quality <num>', 'WebP quality 1–100', { default: 80 })
     .option('-e, --effort <num>', 'Compression effort 0–6', { default: 6 })
     .option('-m, --max-res <WxH>', 'Max resolution', { default: '1920x1080' })
-    .option('--no-resize', 'Disable automatic resizing')
+    .option('--no-resize', 'Preserve original dimensions')
     .option('-d, --delete', 'Delete originals after conversion')
     .option('-r, --recursive', 'Also process subdirectories')
     .option('-w, --watch', 'Watch for new/changed files')
-    .option('-f, --force', 'Force re-conversion even if up-to-date');
+    .option('-f, --force', 'Re-convert even if output is newer (use after changing settings)');
 
   cli.usage('[options]');
-  cli.help();
+  cli.help((sections) => [
+    { body: 'Convert PNG/JPEG files in the current directory to sibling .webp files.\nOriginals are kept unless --delete is supplied. By default, images fit within 1920x1080 without enlargement.' },
+    ...sections,
+    { title: 'Examples', body: '  webpify\n  webpify --recursive\n  webpify --quality 90 --force\n  webpify --no-resize' },
+  ]);
 
   const parsed = cli.parse();
   const options = parsed.options;
@@ -136,7 +140,7 @@ async function convert(src: string, opts: Opts): Promise<void> {
     const pct     = Math.round((1 - info.size / srcSize) * 100);
 
     console.log(
-      `  ✓ ${src}  ${prettyBytes(srcSize)} → ${prettyBytes(info.size)}  (${pct}% smaller)`,
+      `  ✓ ${src}  ${prettyBytes(srcSize)} → ${prettyBytes(info.size)}  (${Math.abs(pct)}% ${pct < 0 ? 'larger' : 'smaller'})`,
     );
 
     if (opts.del) await unlink(src);
@@ -201,7 +205,7 @@ async function batch(opts: Opts): Promise<void> {
         .map((item) => item.file);
 
   if (files.length === 0) {
-    console.log(`Found ${allFiles.length} image(s) (all up-to-date).`);
+    console.log(`Found ${allFiles.length} image(s) (all up-to-date by timestamp). Settings are not compared; use --force to apply changed settings. Skipped originals are kept.`);
     return;
   }
 
