@@ -128,6 +128,7 @@ test('--delete preserves an original when conversion fails', async () => {
   const original = 'This is not an image';
   await Bun.write(join(directory, 'broken.png'), original);
   const result = await runCli('--delete');
+  expect(result.exitCode).toBe(1);
   expect(result.stderr).toContain('broken.png');
   expect(await Bun.file(join(directory, 'broken.png')).text()).toBe(original);
   expect(await Bun.file(join(directory, 'broken.webp')).exists()).toBe(false);
@@ -267,4 +268,135 @@ test.each([
   expect(result.stderr).toContain(option);
   expect(await readdir(directory)).toEqual(['image.png']);
   expect(await Bun.file(join(directory, 'image.png')).bytes()).toEqual(original);
+});
+
+test('--help never converts or deletes images, even with processing flags', async () => {
+  await createImage();
+  const result = await runCli('--help', '--delete', '--force');
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain('Usage:');
+  expect(await readdir(directory)).toEqual(['image.png']);
+});
+
+test.each([{ args: ['image.png'] }, { args: ['--qualty', '90'] }, { args: ['--quality'] }])(
+  'rejects unsupported arguments before touching files: %j',
+  async ({ args }) => {
+    await createImage();
+    const result = await runCli(...args, '--delete');
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('Error:');
+    expect(await readdir(directory)).toEqual(['image.png']);
+  },
+);
+
+test('rejects colliding destinations without overwriting output or deleting sources', async () => {
+  await createImage('photo.png');
+  await createImage('photo.jpg');
+  await Bun.write(join(directory, 'photo.webp'), 'existing output');
+  const result = await runCli('--delete', '--force');
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain('collision');
+  expect(await Bun.file(join(directory, 'photo.webp')).text()).toBe('existing output');
+  expect(await Bun.file(join(directory, 'photo.png')).exists()).toBe(true);
+  expect(await Bun.file(join(directory, 'photo.jpg')).exists()).toBe(true);
+});
+
+test('applies EXIF orientation before resizing and stripping metadata', async () => {
+  await sharp({
+    create: { width: 40, height: 20, channels: 3, background: '#4267ac' },
+  }).withMetadata({ orientation: 6 }).jpeg().toFile(join(directory, 'portrait.jpg'));
+  expect((await runCli('--max-res', '10x30')).exitCode).toBe(0);
+  await expectWebp('portrait.webp', 10, 20);
+  expect((await sharp(join(directory, 'portrait.webp')).metadata()).orientation).toBeUndefined();
+});
+
+test('finishes valid conversions but exits unsuccessfully for a partial failure', async () => {
+  await createImage();
+  await Bun.write(join(directory, 'broken.png'), 'not an image');
+  const result = await runCli();
+  expect(result.exitCode).toBe(1);
+  await expectWebp('image.webp', 40, 20);
+  expect(result.stderr).toContain('broken.png');
+});
+
+test('case-only basenames follow the actual filesystem case sensitivity', async () => {
+  await createImage('photo.png');
+  await createImage('PHOTO.jpg');
+  const caseInsensitive = await Bun.file(join(directory, 'PHOTO.png')).exists();
+  const result = await runCli('--force', '--delete');
+  if (caseInsensitive) {
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('collision');
+    expect(await Bun.file(join(directory, 'photo.png')).exists()).toBe(true);
+    expect(await Bun.file(join(directory, 'PHOTO.jpg')).exists()).toBe(true);
+    expect(await Bun.file(join(directory, 'photo.webp')).exists()).toBe(false);
+  } else {
+    expect(result.exitCode).toBe(0);
+    await expectWebp('photo.webp', 40, 20);
+    await expectWebp('PHOTO.webp', 40, 20);
+  }
+});
+
+test('a source arriving during encoding preserves both originals and existing output', async () => {
+  await createImage('photo.png');
+  await Bun.write(join(directory, 'photo.webp'), 'existing output');
+  // Pause after the real encoder finishes, before the CLI can publish or delete.
+  // This makes the filesystem race deterministic without timing a large image.
+  const preload = join(directory, 'pause-encoder.ts');
+  await Bun.write(preload, `
+    import sharp from ${JSON.stringify(import.meta.resolve('sharp'))};
+    const original = sharp.prototype.toFile;
+    sharp.prototype.toFile = async function (...args) {
+      const result = await original.apply(this, args);
+      await Bun.write('encoded', 'ready');
+      while (!(await Bun.file('release').exists())) await Bun.sleep(10);
+      return result;
+    };
+  `);
+  const child = Bun.spawn([process.execPath, '--preload', preload, cli, '--force', '--delete'], {
+    cwd: directory, stdout: 'pipe', stderr: 'pipe',
+  });
+  watcher = child;
+  await waitFor(() => Bun.file(join(directory, 'encoded')).exists());
+  await createImage('photo.jpg');
+  await Bun.write(join(directory, 'release'), 'go');
+  expect(await child.exited).toBe(1);
+  watcher = undefined;
+  expect(await new Response(child.stderr).text()).toContain('collision');
+  expect(await Bun.file(join(directory, 'photo.webp')).text()).toBe('existing output');
+  expect(await Bun.file(join(directory, 'photo.png')).exists()).toBe(true);
+  expect(await Bun.file(join(directory, 'photo.jpg')).exists()).toBe(true);
+  expect((await readdir(directory)).some((name) => name.startsWith('.webpify-'))).toBe(false);
+});
+
+test('case-insensitive lookup detects collisions before writing or deleting', async () => {
+  await createImage('photo.png');
+  await createImage('PHOTO.jpg');
+  await Bun.write(join(directory, 'photo.webp'), 'existing output');
+  const preload = join(directory, 'case-insensitive.ts');
+  // Emulate only read-side path lookup. A correct preflight never reaches writes.
+  await Bun.write(preload, `
+    import { mock } from 'bun:test';
+    import * as fs from 'node:fs/promises';
+    import { dirname, basename, join } from 'node:path';
+    const original = { ...fs };
+    async function lookup(path) {
+      const names = await original.readdir(dirname(path));
+      const name = names.find(name => name.toLowerCase() === basename(path).toLowerCase());
+      return name ? join(dirname(path), name) : path;
+    }
+    mock.module('node:fs/promises', () => ({
+      ...original,
+      stat: async path => original.stat(await lookup(path)),
+      realpath: async path => original.realpath(await lookup(path)),
+    }));
+  `);
+  const child = Bun.spawn([process.execPath, '--preload', preload, cli, '--force', '--delete'], {
+    cwd: directory, stdout: 'pipe', stderr: 'pipe',
+  });
+  expect(await child.exited).toBe(1);
+  expect(await new Response(child.stderr).text()).toContain('collision');
+  expect(await Bun.file(join(directory, 'photo.webp')).text()).toBe('existing output');
+  expect(await Bun.file(join(directory, 'photo.png')).exists()).toBe(true);
+  expect(await Bun.file(join(directory, 'PHOTO.jpg')).exists()).toBe(true);
 });
