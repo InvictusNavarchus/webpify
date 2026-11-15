@@ -143,6 +143,7 @@ async function convert(src: string, opts: Opts): Promise<void> {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`  ✗ ${src}  ${msg}`);
+    process.exitCode = 1;
   }
 }
 

@@ -128,6 +128,7 @@ test('--delete preserves an original when conversion fails', async () => {
   const original = 'This is not an image';
   await Bun.write(join(directory, 'broken.png'), original);
   const result = await runCli('--delete');
+  expect(result.exitCode).toBe(1);
   expect(result.stderr).toContain('broken.png');
   expect(await Bun.file(join(directory, 'broken.png')).text()).toBe(original);
   expect(await Bun.file(join(directory, 'broken.webp')).exists()).toBe(false);
@@ -307,4 +308,13 @@ test('applies EXIF orientation before resizing and stripping metadata', async ()
   expect((await runCli('--max-res', '10x30')).exitCode).toBe(0);
   await expectWebp('portrait.webp', 10, 20);
   expect((await sharp(join(directory, 'portrait.webp')).metadata()).orientation).toBeUndefined();
+});
+
+test('finishes valid conversions but exits unsuccessfully for a partial failure', async () => {
+  await createImage();
+  await Bun.write(join(directory, 'broken.png'), 'not an image');
+  const result = await runCli();
+  expect(result.exitCode).toBe(1);
+  await expectWebp('image.webp', 40, 20);
+  expect(result.stderr).toContain('broken.png');
 });
