@@ -29,7 +29,7 @@ function parseOpts(): Opts {
 
   cli
     .option('-q, --quality <num>', 'WebP quality 1–100', { default: 80 })
-    .option('-e, --effort <num>', 'Compression effort 0–9', { default: 6 })
+    .option('-e, --effort <num>', 'Compression effort 0–6', { default: 6 })
     .option('-m, --max-res <WxH>', 'Max resolution', { default: '1920x1080' })
     .option('--no-resize', 'Disable automatic resizing')
     .option('-d, --delete', 'Delete originals after conversion')
@@ -46,18 +46,22 @@ function parseOpts(): Opts {
   const options = parsed.options;
 
   // Validation: Quality & Effort
-  if (options.quality < 1 || options.quality > 100) {
-    console.error('Error: --quality must be 1–100');
+  if (!Number.isInteger(options.quality) || options.quality < 1 || options.quality > 100) {
+    console.error('Error: --quality must be an integer from 1–100');
     process.exit(1);
   }
-  if (options.effort < 0 || options.effort > 9) {
-    console.error('Error: --effort must be 0–9');
+  if (!Number.isInteger(options.effort) || options.effort < 0 || options.effort > 6) {
+    console.error('Error: --effort must be an integer from 0–6');
     process.exit(1);
   }
 
   // Validation: Max Resolution (WxH)
-  const [w, h] = String(options.maxRes).split(/x/i).map(Number);
-  if (!w || !h || w <= 0 || h <= 0) {
+  const resolution = String(options.maxRes);
+  const [w, h] = resolution.split(/x/i).map(Number);
+  if (
+    !/^\d+x\d+$/i.test(resolution) || !w || !h ||
+    !Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w <= 0 || h <= 0
+  ) {
     console.error('Error: --max-res expects WxH, e.g. 1920x1080');
     process.exit(1);
   }

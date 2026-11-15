@@ -129,15 +129,34 @@ test('only processes nested images with --recursive', async () => {
 });
 
 test.each([
+  [1, 0],
+  [100, 6],
+])('accepts quality %i and effort %i at the supported bounds', async (quality, effort) => {
+  await createImage();
+  const result = await runCli('--quality', String(quality), '--effort', String(effort));
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr).toBe('');
+  await expectWebp('image.webp', 40, 20);
+});
+
+test.each([
   ['--quality', '0'],
   ['--quality', '101'],
   ['--quality', 'abc'],
+  ['--quality', '1.5'],
+  ['--quality', 'Infinity'],
   ['--effort', '-1'],
+  ['--effort', '7'],
+  ['--effort', '9'],
   ['--effort', '10'],
   ['--effort', 'abc'],
+  ['--effort', '1.5'],
   ['--max-res', 'invalid'],
   ['--max-res', '0x10'],
   ['--max-res', '10x20x30'],
+  ['--max-res', '1.5x20'],
+  ['--max-res', 'Infinityx20'],
+  ['--max-res', '9007199254740992x20'],
 ])('rejects %s %s before processing files', async (option, value) => {
   await createImage();
   const original = await Bun.file(join(directory, 'image.png')).bytes();
